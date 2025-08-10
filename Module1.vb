@@ -79,6 +79,7 @@ Module Module1
                         outputDir As String, relationships As Dictionary(Of String, List(Of Relationship)))
         Dim className = ToPascalCase(tableName)
         Dim sb As New Text.StringBuilder()
+        sb.AppendLine("Imports System.Collections.Generic")
         sb.AppendLine($"Public Class {className}")
         sb.AppendLine()
 
