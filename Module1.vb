@@ -152,30 +152,50 @@ Module Module1
         End Using
     End Function
 
-    Private Function GetVbType(mySqlType As String, isNullable As Boolean) As String
-        Dim typeMap As New Dictionary(Of String, String) From {
-        {"int", "Integer"}, {"tinyint", "Boolean"}, {"smallint", "Short"},
-        {"bigint", "Long"}, {"decimal", "Decimal"}, {"float", "Single"},
-        {"double", "Double"}, {"char", "String"}, {"varchar", "String"},
-        {"text", "String"}, {"datetime", "DateTime"}, {"timestamp", "DateTime"},
-        {"date", "DateTime"}, {"time", "TimeSpan"}, {"year", "Integer"},
-        {"bit", "Boolean"}, {"binary", "Byte()"}, {"varbinary", "Byte()"},
-        {"blob", "Byte()"}, {"enum", "String"}, {"set", "String"}
-    }
+    Private Function GetVbType(dataType As String, isNullable As Boolean) As String
+        ' Normalize the data type by removing length/precision
+        Dim baseType = dataType.Split("("c)(0).ToLower()
 
-        ' SAFE type lookup - no invalid If operators
-        Dim vbType As String = "Object"
-        For Each kvp In typeMap
-            If mySqlType.ToLower().Contains(kvp.Key.ToLower()) Then
-                vbType = kvp.Value
-                Exit For
-            End If
-        Next
+        Dim vbType As String = "Object" ' Default fallback
 
-        ' SAFE nullable handling
-        If isNullable AndAlso IsValueType(vbType) Then
+        Select Case baseType
+            Case "tinyint"
+                ' Special handling for tinyint(1) which MySQL uses as boolean
+                If dataType.ToLower().StartsWith("tinyint(1)") Then
+                    vbType = "Boolean"
+                Else
+                    vbType = "Byte"
+                End If
+
+            Case "smallint"
+                vbType = "Short"
+            Case "int", "integer", "mediumint"
+                vbType = "Integer"
+            Case "bigint"
+                vbType = "Long"
+            Case "decimal", "numeric", "dec"
+                vbType = "Decimal"
+            Case "float"
+                vbType = "Single"
+            Case "double"
+                vbType = "Double"
+            Case "bit"
+                vbType = "Boolean"
+            Case "date", "year"
+                vbType = "Date"
+            Case "datetime", "timestamp", "time"
+                vbType = "DateTime"
+            Case "char", "varchar", "text", "tinytext", "mediumtext", "longtext", "enum", "set"
+                vbType = "String"
+            Case "binary", "varbinary", "blob", "tinyblob", "mediumblob", "longblob"
+                vbType = "Byte()"
+        End Select
+
+        ' Handle nullable types
+        If isNullable AndAlso vbType <> "String" AndAlso vbType <> "Object" AndAlso vbType <> "Byte()" Then
             Return $"Nullable(Of {vbType})"
         End If
+
         Return vbType
     End Function
 
