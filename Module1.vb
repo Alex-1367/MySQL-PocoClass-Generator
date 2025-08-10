@@ -1,153 +1,158 @@
 ﻿Imports MySql.Data.MySqlClient
 Imports System.IO
+Imports System.Text
 
 Module Module1
     Sub Main()
+        Console.WriteLine("Starting POCO generation...")
         GenerateClasses(
-            My.MySettings.Default.MySqlConnectionString, My.MySettings.Default.PocoClassTargetPath)
+            My.MySettings.Default.MySqlConnectionString,
+            My.MySettings.Default.PocoClassTargetPath)
+        Console.WriteLine("Generation complete!")
     End Sub
 
     Public Sub GenerateClasses(connStr As String, outputDir As String)
         Using conn As New MySqlConnection(connStr)
             conn.Open()
-            Console.WriteLine($"{connStr} opened using MySql.Data.9.4.0")
+            Console.WriteLine($"Connected to: {conn.Database}")
+            Console.WriteLine("Fetching tables...")
 
             ' Get all tables
-            Console.WriteLine()
             Dim tables As New List(Of String)
             Using cmd As New MySqlCommand("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE()", conn)
-                Console.WriteLine("Tables:")
                 Using reader = cmd.ExecuteReader()
                     While reader.Read()
-                        Dim Tab As String = reader.GetString(0)
-                        Console.WriteLine(Tab)
-                        tables.Add(reader.GetString(0))
+                        Dim tableName = reader.GetString(0)
+                        tables.Add(tableName)
+                        Console.WriteLine($"Found table: {tableName}")
                     End While
                 End Using
             End Using
 
-            ' Get all foreign key relationships
-            Console.WriteLine()
+            ' Get relationships
+            Console.WriteLine("Analyzing relationships...")
             Dim relationships = GetRelationships(conn)
 
-            ' Generate class for each table
-            Console.WriteLine()
-            Console.WriteLine($"{outputDir}:")
+            ' Generate classes
             For Each table In tables
+                Console.WriteLine($"Generating {table}...")
                 GenerateClass(conn, table, outputDir, relationships)
             Next
         End Using
     End Sub
 
     Private Function GetRelationships(conn As MySqlConnection) As Dictionary(Of String, List(Of Relationship))
-        Console.WriteLine("Relations:")
-        Dim relationships = New Dictionary(Of String, List(Of Relationship))
+        Dim relationships = New Dictionary(Of String, List(Of Relationship))(StringComparer.OrdinalIgnoreCase)
 
         Dim sql = "
             SELECT 
-                TABLE_NAME, 
-                COLUMN_NAME, 
-                REFERENCED_TABLE_NAME, 
-                REFERENCED_COLUMN_NAME
-            FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
-            WHERE TABLE_SCHEMA = DATABASE()
-            AND REFERENCED_TABLE_NAME IS NOT NULL"
+                kcu.TABLE_NAME,
+                kcu.COLUMN_NAME,
+                kcu.REFERENCED_TABLE_NAME,
+                kcu.REFERENCED_COLUMN_NAME
+            FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+            WHERE kcu.TABLE_SCHEMA = DATABASE()
+            AND kcu.REFERENCED_TABLE_NAME IS NOT NULL"
 
         Using cmd As New MySqlCommand(sql, conn)
             Using reader = cmd.ExecuteReader()
                 While reader.Read()
                     Dim tableName = reader.GetString(0)
-                    Dim relationship = New Relationship With {
-                    .ColumnName = reader.GetString(1),
-                    .ReferencedTable = reader.GetString(2),
-                    .ReferencedColumn = reader.GetString(3)
-                }
+                    Dim colName = reader.GetString(1)
+                    Dim refTable = reader.GetString(2)
+                    Dim refCol = reader.GetString(3)
+
+                    Console.WriteLine($"Relationship: {tableName}.{colName} → {refTable}.{refCol}")
 
                     If Not relationships.ContainsKey(tableName) Then
                         relationships.Add(tableName, New List(Of Relationship))
                     End If
-                    Console.WriteLine($"{tableName}:{relationship}")
-                    relationships(tableName).Add(relationship)
+                    relationships(tableName).Add(New Relationship With {
+                        .ColumnName = colName,
+                        .ReferencedTable = refTable,
+                        .ReferencedColumn = refCol
+                    })
                 End While
             End Using
         End Using
-
         Return relationships
     End Function
 
     Private Sub GenerateClass(conn As MySqlConnection, tableName As String,
-                        outputDir As String, relationships As Dictionary(Of String, List(Of Relationship)))
+                             outputDir As String, relationships As Dictionary(Of String, List(Of Relationship)))
         Dim className = ToPascalCase(tableName)
-        Dim sb As New Text.StringBuilder()
+        Dim sb As New StringBuilder()
+
+        sb.AppendLine("' AUTO-GENERATED CLASS")
+        sb.AppendLine("' Table: " & tableName)
+        sb.AppendLine("' Generated: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))
         sb.AppendLine("Imports System.Collections.Generic")
+        sb.AppendLine()
         sb.AppendLine($"Public Class {className}")
         sb.AppendLine()
 
-        ' Get columns
-        Using cmd As New MySqlCommand($"
-            SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_KEY
-            FROM INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_SCHEMA = DATABASE() 
-            AND TABLE_NAME = '{tableName}'
-            ORDER BY ORDINAL_POSITION", conn)
+        ' Track which columns are FKs so we don't duplicate
+        Dim foreignKeyColumns As New List(Of String)
+        If relationships.ContainsKey(tableName) Then
+            foreignKeyColumns.AddRange(relationships(tableName).Select(Function(r) r.ColumnName))
+        End If
 
+        ' Generate all columns
+        Using cmd As New MySqlCommand($"DESCRIBE `{tableName}`", conn)
             Using reader = cmd.ExecuteReader()
                 While reader.Read()
                     Dim colName = reader.GetString(0)
                     Dim dataType = reader.GetString(1)
-                    Dim isNullable = reader.GetString(2)
-                    Dim isPrimary = reader.GetString(3) = "PRI"
+                    Dim isNullable = reader.GetString(2) = "YES"
 
-                    ' Skip foreign key columns (we'll add navigation properties)
-                    If relationships.ContainsKey(tableName) AndAlso
-                   relationships(tableName).Any(Function(r) r.ColumnName = colName) Then
-                        Continue While
-                    End If
-
+                    ' Always include ALL columns, including FKs
                     Dim vbType = GetVbType(dataType, isNullable)
-                    sb.AppendLine($"    Public Property {ToPascalCase(colName)} As {vbType}")
+                    sb.AppendLine($"    Public Property {colName} As {vbType}")
+                    Console.WriteLine($"  Added property: {colName} ({vbType})")
                 End While
             End Using
         End Using
 
-        ' Add navigation properties
+        ' Add navigation properties for relationships
         If relationships.ContainsKey(tableName) Then
             sb.AppendLine()
-
             For Each rel In relationships(tableName)
-                ' Check relationship type
-                If IsOneToOne(conn, tableName, rel.ReferencedTable) Then
-                    sb.AppendLine($"    Public Property {ToPascalCase(rel.ReferencedTable)} As {ToPascalCase(rel.ReferencedTable)}")
-                Else
-                    sb.AppendLine($"    Public Property {ToPascalCase(rel.ReferencedTable)}List As ICollection(Of {ToPascalCase(rel.ReferencedTable)})")
+                Dim navPropertyName = ToPascalCase(rel.ReferencedTable)
+                If Not IsOneToOne(conn, tableName, rel.ReferencedTable) Then
+                    navPropertyName += "List"
                 End If
+
+                sb.AppendLine($"    Public Property {navPropertyName} As List(Of {ToPascalCase(rel.ReferencedTable)})")
+                Console.WriteLine($"  Added navigation: {navPropertyName}")
             Next
         End If
 
         sb.AppendLine("End Class")
 
+        ' Write to file
         Directory.CreateDirectory(outputDir)
-        File.WriteAllText(Path.Combine(outputDir, $"{className}.vb"), sb.ToString())
-        Console.WriteLine(className)
+        Dim filePath = Path.Combine(outputDir, $"{className}.vb")
+        File.WriteAllText(filePath, sb.ToString())
+        Console.WriteLine($"Saved to: {filePath}")
     End Sub
 
     Private Function IsOneToOne(conn As MySqlConnection, tableName As String, referencedTable As String) As Boolean
-        ' Check if this is a one-to-one relationship
-        Using cmd As New MySqlCommand($"
+        ' Check if the referenced table has a FK back to this table
+        Dim sql = "
             SELECT COUNT(*) 
-            FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-            JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
-              ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
-            WHERE tc.TABLE_SCHEMA = DATABASE()
-            AND tc.TABLE_NAME = '{referencedTable}'
-            AND tc.CONSTRAINT_TYPE = 'FOREIGN KEY'
-            AND kcu.REFERENCED_TABLE_NAME = '{tableName}'", conn)
+            FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE 
+            WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = @referencedTable
+            AND REFERENCED_TABLE_NAME = @tableName"
 
+        Using cmd As New MySqlCommand(sql, conn)
+            cmd.Parameters.AddWithValue("@tableName", tableName)
+            cmd.Parameters.AddWithValue("@referencedTable", referencedTable)
             Return Convert.ToInt32(cmd.ExecuteScalar()) > 0
         End Using
     End Function
 
-    Private Function GetVbType(mySqlType As String, nullable As String) As String
+    Private Function GetVbType(mySqlType As String, isNullable As Boolean) As String
         Dim typeMap As New Dictionary(Of String, String) From {
         {"int", "Integer"}, {"tinyint", "Boolean"}, {"smallint", "Short"},
         {"bigint", "Long"}, {"decimal", "Decimal"}, {"float", "Single"},
@@ -158,23 +163,26 @@ Module Module1
         {"blob", "Byte()"}, {"enum", "String"}, {"set", "String"}
     }
 
+        ' SAFE type lookup - no invalid If operators
         Dim vbType As String = "Object"
-        If typeMap.ContainsKey(mySqlType.ToLower()) Then
-            vbType = typeMap(mySqlType.ToLower())
-        End If
+        For Each kvp In typeMap
+            If mySqlType.ToLower().Contains(kvp.Key.ToLower()) Then
+                vbType = kvp.Value
+                Exit For
+            End If
+        Next
 
-        ' Only make nullable if it's a value type and column is nullable
-        If nullable = "YES" AndAlso IsValueType(vbType) Then
+        ' SAFE nullable handling
+        If isNullable AndAlso IsValueType(vbType) Then
             Return $"Nullable(Of {vbType})"
-        Else
-            Return vbType
         End If
+        Return vbType
     End Function
 
-    Private Function IsValueType(vbType As String) As Boolean
-        Select Case vbType.ToLower()
+    Private Function IsValueType(typeName As String) As Boolean
+        Select Case typeName.ToLower()
             Case "integer", "boolean", "short", "long", "decimal", "single",
-             "double", "datetime", "timespan", "byte()"
+                 "double", "datetime", "timespan", "byte()"
                 Return True
             Case Else
                 Return False
