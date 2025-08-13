@@ -15,27 +15,31 @@ Module Module1
         Using conn As New MySqlConnection(connStr)
             conn.Open()
             Console.WriteLine($"Connected to: {conn.Database}")
-            Console.WriteLine("Fetching tables...")
+            Console.WriteLine("Fetching tables and views...")
 
-            ' Get all tables
-            Dim tables As New List(Of String)
-            Using cmd As New MySqlCommand("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE()", conn)
+            ' Get all tables AND views
+            Dim tables As New List(Of TableInfo)
+            Using cmd As New MySqlCommand("SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE()", conn)
                 Using reader = cmd.ExecuteReader()
                     While reader.Read()
                         Dim tableName = reader.GetString(0)
-                        tables.Add(tableName)
-                        Console.WriteLine($"Found table: {tableName}")
+                        Dim tableType = reader.GetString(1)
+                        tables.Add(New TableInfo With {
+                            .Name = tableName,
+                            .IsView = (tableType = "VIEW")
+                        })
+                        Console.WriteLine($"Found {(If(tableType = "VIEW", "view", "table"))}: {tableName}")
                     End While
                 End Using
             End Using
 
-            ' Get relationships
+            ' Get relationships (only for tables, not views)
             Console.WriteLine("Analyzing relationships...")
             Dim relationships = GetRelationships(conn)
 
             ' Generate classes
             For Each table In tables
-                Console.WriteLine($"Generating {table}...")
+                Console.WriteLine($"Generating {table.Name}...")
                 GenerateClass(conn, table, outputDir, relationships)
             Next
         End Using
@@ -78,13 +82,13 @@ Module Module1
         Return relationships
     End Function
 
-    Private Sub GenerateClass(conn As MySqlConnection, tableName As String,
+    Private Sub GenerateClass(conn As MySqlConnection, tableInfo As TableInfo,
                              outputDir As String, relationships As Dictionary(Of String, List(Of Relationship)))
-        Dim className = ToPascalCase(tableName)
+        Dim className = ToPascalCase(tableInfo.Name)
         Dim sb As New StringBuilder()
 
         sb.AppendLine("' AUTO-GENERATED CLASS")
-        sb.AppendLine("' Table: " & tableName)
+        sb.AppendLine($"' {(If(tableInfo.IsView, "View", "Table"))}: {tableInfo.Name}")
         sb.AppendLine("' Generated: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))
         sb.AppendLine("Imports System.Collections.Generic")
         sb.AppendLine()
@@ -93,12 +97,12 @@ Module Module1
 
         ' Track which columns are FKs so we don't duplicate
         Dim foreignKeyColumns As New List(Of String)
-        If relationships.ContainsKey(tableName) Then
-            foreignKeyColumns.AddRange(relationships(tableName).Select(Function(r) r.ColumnName))
+        If Not tableInfo.IsView AndAlso relationships.ContainsKey(tableInfo.Name) Then
+            foreignKeyColumns.AddRange(relationships(tableInfo.Name).Select(Function(r) r.ColumnName))
         End If
 
         ' Generate all columns
-        Using cmd As New MySqlCommand($"DESCRIBE `{tableName}`", conn)
+        Using cmd As New MySqlCommand($"DESCRIBE `{tableInfo.Name}`", conn)
             Using reader = cmd.ExecuteReader()
                 While reader.Read()
                     Dim colName = reader.GetString(0)
@@ -113,12 +117,12 @@ Module Module1
             End Using
         End Using
 
-        ' Add navigation properties for relationships
-        If relationships.ContainsKey(tableName) Then
+        ' Add navigation properties for relationships (only for tables, not views)
+        If Not tableInfo.IsView AndAlso relationships.ContainsKey(tableInfo.Name) Then
             sb.AppendLine()
-            For Each rel In relationships(tableName)
+            For Each rel In relationships(tableInfo.Name)
                 Dim navPropertyName = ToPascalCase(rel.ReferencedTable)
-                If Not IsOneToOne(conn, tableName, rel.ReferencedTable) Then
+                If Not IsOneToOne(conn, tableInfo.Name, rel.ReferencedTable) Then
                     navPropertyName += "List"
                 End If
 
@@ -219,4 +223,9 @@ Public Class Relationship
     Public Property ColumnName As String
     Public Property ReferencedTable As String
     Public Property ReferencedColumn As String
+End Class
+
+Public Class TableInfo
+    Public Property Name As String
+    Public Property IsView As Boolean
 End Class
