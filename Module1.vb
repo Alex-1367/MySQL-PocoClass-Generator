@@ -129,14 +129,26 @@ Module Module1
                 End While
             End Using
         End Using
-
         ' Add navigation properties for relationships (only for tables, not views)
         If Not tableInfo.IsView AndAlso relationships.ContainsKey(tableInfo.Name) Then
             sb.AppendLine()
+
+            ' Track used property names to avoid duplicates
+            Dim usedPropertyNames As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
             For Each rel In relationships(tableInfo.Name)
                 If rel.RelationshipType = "ChildToParent" Then
                     ' This is a FK relationship FROM current table TO referenced table
                     Dim navPropertyName = ToPascalCase(rel.ReferencedTable)
+
+                    ' Check if this property name is already used (multiple FKs to same table)
+                    If usedPropertyNames.Contains(navPropertyName) Then
+                        ' Use the column name to make it unique (e.g., "StartTown" -> "StartTowns")
+                        navPropertyName = ToPascalCase(rel.ColumnName.Replace("Town", "")) + ToPascalCase(rel.ReferencedTable)
+                    End If
+
+                    usedPropertyNames.Add(navPropertyName)
+
                     If Not IsOneToOne(conn, tableInfo.Name, rel.ReferencedTable) Then
                         ' For many-to-one, use single reference
                         sb.AppendLine($"    Public Property {navPropertyName} As {ToPascalCase(rel.ReferencedTable)}")
@@ -149,6 +161,15 @@ Module Module1
                 ElseIf rel.RelationshipType = "ParentToChild" Then
                     ' This is a relationship FROM referenced table TO current table (children)
                     Dim navPropertyName = ToPascalCase(rel.ReferencedTable) + "List"
+
+                    ' Check if this property name is already used
+                    If usedPropertyNames.Contains(navPropertyName) Then
+                        ' Use a more descriptive name for the collection
+                        navPropertyName = ToPascalCase(rel.ReferencedTable) + "Collection"
+                    End If
+
+                    usedPropertyNames.Add(navPropertyName)
+
                     sb.AppendLine($"    Public Property {navPropertyName} As List(Of {ToPascalCase(rel.ReferencedTable)})")
                     Console.WriteLine($"  Added children navigation: {navPropertyName}")
                 End If
